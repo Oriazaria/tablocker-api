@@ -6,11 +6,29 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// מידלוור
+// מידלוור - תיקון CORS כדי לאפשר גישה מתוספי Chrome
 app.use(cors({
-    origin: ['https://remote.azriasolutions.com', 'https://tablocker-mobile.vercel.app'],
-    credentials: true
+    origin: function(origin, callback) {
+        // אפשר גישה מתוספי Chrome (אין להם origin רגיל)
+        const allowedOrigins = [
+            'https://remote.azriasolutions.com',
+            'https://tablocker-mobile.vercel.app',
+            'http://localhost:3000', // לפיתוח
+            'http://localhost:5000'  // לפיתוח
+        ];
+        
+        // אם אין origin (כמו בתוספי Chrome) או שה-origin מורשה
+        if (!origin || allowedOrigins.includes(origin) || origin.startsWith('chrome-extension://')) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
 app.use(express.json());
 
 // אתחול מסד נתונים SQLite
@@ -36,7 +54,7 @@ function initDatabase() {
         created_at INTEGER DEFAULT (strftime('%s', 'now'))
     )`, (err) => {
         if (err) console.error('Error creating devices table:', err);
-        else console.log('Devices table ready');
+        else console.log('✅ Devices table ready');
     });
 
     // טבלת פקודות
@@ -51,7 +69,7 @@ function initDatabase() {
         FOREIGN KEY (device_id) REFERENCES devices (id)
     )`, (err) => {
         if (err) console.error('Error creating commands table:', err);
-        else console.log('Commands table ready');
+        else console.log('✅ Commands table ready');
     });
 
     // טבלת תגובות
@@ -64,7 +82,7 @@ function initDatabase() {
         FOREIGN KEY (device_id) REFERENCES devices (id)
     )`, (err) => {
         if (err) console.error('Error creating responses table:', err);
-        else console.log('Responses table ready');
+        else console.log('✅ Responses table ready');
     });
 }
 
@@ -87,6 +105,7 @@ setInterval(() => {
     const tenMinutesAgo = Math.floor(Date.now() / 1000) - 600;
     db.run('UPDATE devices SET status = "offline" WHERE last_seen < ?', [tenMinutesAgo]);
     
+    console.log('🧹 Cleanup completed');
 }, 300000); // כל 5 דקות
 
 // **ENDPOINTS**
@@ -96,7 +115,26 @@ app.get('/health', (req, res) => {
     res.json({ 
         status: 'healthy', 
         timestamp: new Date().toISOString(),
-        database: 'connected'
+        database: 'connected',
+        version: '2.0.0'
+    });
+});
+
+// Ping endpoint עבור התוסף
+app.post('/api/ping', (req, res) => {
+    const { deviceId } = req.body;
+    
+    if (deviceId) {
+        // עדכן last_seen
+        const timestamp = Math.floor(Date.now() / 1000);
+        db.run('UPDATE devices SET last_seen = ?, status = "online" WHERE id = ?', 
+            [timestamp, deviceId]);
+    }
+    
+    res.json({ 
+        status: 'pong', 
+        timestamp: Date.now(),
+        message: 'Server is alive'
     });
 });
 
@@ -120,7 +158,7 @@ app.post('/api/register', (req, res) => {
             return res.status(500).json({ error: 'Registration failed' });
         }
         
-        console.log(`Device registered: ${deviceId} (code: ${deviceCode})`);
+        console.log(`✅ Device registered: ${deviceId} (code: ${deviceCode})`);
         res.json({ 
             success: true, 
             deviceId, 
@@ -135,26 +173,45 @@ app.post('/api/find-device', (req, res) => {
     const { deviceCode } = req.body;
     
     if (!deviceCode || deviceCode.length !== 6) {
-        return res.status(400).json({ error: 'Invalid device code' });
+        return res.status(400).json({ 
+            error: 'Invalid device code',
+            found: false 
+        });
     }
 
     const upperCode = deviceCode.toUpperCase();
+    
+    // בדוק אם הקוד תקין (רק A-F, 0-9)
+    if (!/^[A-F0-9]{6}$/.test(upperCode)) {
+        return res.status(400).json({ 
+            error: 'Invalid code format',
+            found: false 
+        });
+    }
     
     db.get('SELECT * FROM devices WHERE device_code = ? AND status = "online"', 
         [upperCode], (err, device) => {
         if (err) {
             console.error('Database error:', err);
-            return res.status(500).json({ error: 'Database error' });
+            return res.status(500).json({ 
+                error: 'Database error',
+                found: false 
+            });
         }
         
         if (!device) {
-            return res.status(404).json({ error: 'Device not found or offline' });
+            console.log(`❌ Device not found: ${upperCode}`);
+            return res.json({ 
+                found: false,
+                error: 'Device not found or offline' 
+            });
         }
         
         // עדכן זמן ראייה אחרון
         const timestamp = Math.floor(Date.now() / 1000);
         db.run('UPDATE devices SET last_seen = ? WHERE id = ?', [timestamp, device.id]);
         
+        console.log(`✅ Device found: ${upperCode}`);
         res.json({
             found: true,
             device: {
@@ -186,7 +243,10 @@ app.post('/api/send-command', (req, res) => {
         }
         
         if (!device) {
-            return res.status(404).json({ error: 'Device not found or offline' });
+            return res.status(404).json({ 
+                error: 'Device not found or offline',
+                success: false 
+            });
         }
         
         // הוסף פקודה לתור
@@ -197,10 +257,13 @@ app.post('/api/send-command', (req, res) => {
             [device.id, upperCode, commandStr, timestamp], function(err) {
             if (err) {
                 console.error('Command insertion error:', err);
-                return res.status(500).json({ error: 'Failed to queue command' });
+                return res.status(500).json({ 
+                    error: 'Failed to queue command',
+                    success: false 
+                });
             }
             
-            console.log(`Command queued for device ${upperCode}: ${command.action}`);
+            console.log(`📤 Command queued for device ${upperCode}: ${command.action}`);
             res.json({ 
                 success: true, 
                 commandId: this.lastID,
@@ -210,7 +273,7 @@ app.post('/api/send-command', (req, res) => {
     });
 });
 
-// קבלת פקודות עבור מכשיר
+// קבלת פקודות עבור מכשיר (polling מהתוסף)
 app.get('/api/commands/:deviceId', (req, res) => {
     const { deviceId } = req.params;
     
@@ -221,10 +284,14 @@ app.get('/api/commands/:deviceId', (req, res) => {
     // עדכן זמן ראייה אחרון
     const timestamp = Math.floor(Date.now() / 1000);
     db.run('UPDATE devices SET last_seen = ?, status = "online" WHERE id = ?', 
-        [timestamp, deviceId]);
+        [timestamp, deviceId], (updateErr) => {
+        if (updateErr) {
+            console.error('Update error:', updateErr);
+        }
+    });
 
     // קבל פקודות ממתינות
-    db.all('SELECT id, command FROM commands WHERE device_id = ? AND status = "pending" ORDER BY created_at ASC',
+    db.all('SELECT id, command FROM commands WHERE device_id = ? AND status = "pending" ORDER BY created_at ASC LIMIT 10',
         [deviceId], (err, commands) => {
         if (err) {
             console.error('Commands retrieval error:', err);
@@ -238,7 +305,13 @@ app.get('/api/commands/:deviceId', (req, res) => {
             const executeTimestamp = Math.floor(Date.now() / 1000);
             
             db.run(`UPDATE commands SET status = "completed", executed_at = ? WHERE id IN (${placeholders})`,
-                [executeTimestamp, ...commandIds]);
+                [executeTimestamp, ...commandIds], (updateErr) => {
+                if (updateErr) {
+                    console.error('Command update error:', updateErr);
+                }
+            });
+            
+            console.log(`📥 Sending ${commands.length} commands to device ${deviceId}`);
         }
         
         // החזר פקודות מפוענחות
@@ -267,6 +340,9 @@ app.post('/api/response', (req, res) => {
     const timestamp = Math.floor(Date.now() / 1000);
     const responseStr = JSON.stringify(responseData);
 
+    // עדכן last_seen
+    db.run('UPDATE devices SET last_seen = ? WHERE id = ?', [timestamp, deviceId]);
+
     db.run('INSERT INTO responses (device_id, device_code, response_data, created_at) VALUES (?, ?, ?, ?)',
         [deviceId, deviceCode, responseStr, timestamp], function(err) {
         if (err) {
@@ -274,6 +350,7 @@ app.post('/api/response', (req, res) => {
             return res.status(500).json({ error: 'Failed to save response' });
         }
         
+        console.log(`💾 Response saved from device ${deviceCode}: ${responseData.status || 'unknown'}`);
         res.json({ success: true, responseId: this.lastID });
     });
 });
@@ -283,13 +360,20 @@ app.get('/api/responses/:deviceCode', (req, res) => {
     const { deviceCode } = req.params;
     const upperCode = deviceCode.toUpperCase();
     
-    // קבל תגובות מהשעה האחרונה
-    const oneHourAgo = Math.floor(Date.now() / 1000) - 3600;
+    // קבל תגובות מ-5 הדקות האחרונות (לא שעה שלמה)
+    const fiveMinutesAgo = Math.floor(Date.now() / 1000) - 300;
     
     db.all('SELECT response_data, created_at FROM responses WHERE device_code = ? AND created_at > ? ORDER BY created_at DESC LIMIT 10',
-        [upperCode, oneHourAgo], (err, responses) => {
+        [upperCode, fiveMinutesAgo], (err, responses) => {
         if (err) {
             return res.status(500).json({ error: 'Failed to get responses' });
+        }
+        
+        // מחק תגובות שנקראו (אופציונלי)
+        if (responses.length > 0) {
+            const oldestTimestamp = responses[responses.length - 1].created_at;
+            db.run('DELETE FROM responses WHERE device_code = ? AND created_at <= ?', 
+                [upperCode, oldestTimestamp]);
         }
         
         const parsedResponses = responses.map(r => {
@@ -309,32 +393,76 @@ app.get('/api/responses/:deviceCode', (req, res) => {
 
 // סטטיסטיקות (אופציונלי)
 app.get('/api/stats', (req, res) => {
-    db.all(`
-        SELECT 
-            COUNT(*) as total_devices,
-            SUM(CASE WHEN status = 'online' THEN 1 ELSE 0 END) as online_devices,
-            SUM(CASE WHEN status = 'offline' THEN 1 ELSE 0 END) as offline_devices
-        FROM devices
-    `, (err, stats) => {
-        if (err) {
-            return res.status(500).json({ error: 'Failed to get stats' });
-        }
-        
-        res.json(stats[0] || { total_devices: 0, online_devices: 0, offline_devices: 0 });
+    const queries = {
+        devices: new Promise((resolve, reject) => {
+            db.get(`
+                SELECT 
+                    COUNT(*) as total_devices,
+                    SUM(CASE WHEN status = 'online' THEN 1 ELSE 0 END) as online_devices,
+                    SUM(CASE WHEN status = 'offline' THEN 1 ELSE 0 END) as offline_devices
+                FROM devices
+            `, (err, row) => {
+                if (err) reject(err);
+                else resolve(row || { total_devices: 0, online_devices: 0, offline_devices: 0 });
+            });
+        }),
+        commands: new Promise((resolve, reject) => {
+            db.get(`
+                SELECT 
+                    COUNT(*) as total_commands,
+                    SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_commands,
+                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_commands
+                FROM commands
+                WHERE created_at > strftime('%s', 'now') - 3600
+            `, (err, row) => {
+                if (err) reject(err);
+                else resolve(row || { total_commands: 0, pending_commands: 0, completed_commands: 0 });
+            });
+        })
+    };
+
+    Promise.all([queries.devices, queries.commands])
+        .then(([devices, commands]) => {
+            res.json({
+                devices,
+                commands,
+                server: {
+                    uptime: process.uptime(),
+                    memory: process.memoryUsage(),
+                    timestamp: new Date().toISOString()
+                }
+            });
+        })
+        .catch(err => {
+            res.status(500).json({ error: 'Failed to get stats' });
+        });
+});
+
+// 404 handler
+app.use((req, res) => {
+    res.status(404).json({ 
+        error: 'Endpoint not found',
+        path: req.path,
+        method: req.method
     });
 });
 
 // טיפול בשגיאות
 app.use((err, req, res, next) => {
     console.error('Server error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ 
+        error: 'Internal server error',
+        message: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
 });
 
 // התחלת השרת
 app.listen(PORT, () => {
     console.log(`🚀 Tab Locker API Server running on port ${PORT}`);
     console.log(`🌐 Health check: http://localhost:${PORT}/health`);
+    console.log(`📊 Stats: http://localhost:${PORT}/api/stats`);
     console.log(`🔒 Database: ${dbPath}`);
+    console.log(`🌍 CORS enabled for Chrome extensions and known origins`);
 });
 
 // סגירה נקייה
@@ -348,4 +476,15 @@ process.on('SIGINT', () => {
         }
         process.exit(0);
     });
+});
+
+// טיפול בשגיאות לא צפויות
+process.on('uncaughtException', (err) => {
+    console.error('💥 Uncaught Exception:', err);
+    process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
+    process.exit(1);
 });
