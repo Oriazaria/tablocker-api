@@ -110,13 +110,22 @@ setInterval(() => {
 
 // **ENDPOINTS**
 
-// בדיקת בריאות השרת
+// בדיקת בריאות השרת - מעודכן
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'healthy', 
         timestamp: new Date().toISOString(),
         database: 'connected',
-        version: '2.0.0'
+        version: '2.0.0',
+        server: 'Tab Locker API Server',
+        endpoints: {
+            register: '/api/register',
+            findDevice: '/api/find-device', 
+            sendCommand: '/api/send-command',
+            commands: '/api/commands/:deviceId',
+            response: '/api/response',
+            responses: '/api/responses/:deviceCode'
+        }
     });
 });
 
@@ -355,27 +364,26 @@ app.post('/api/response', (req, res) => {
     });
 });
 
-// קבלת תגובות לפי קוד מכשיר (עבור האפליקציה)
+// קבלת תגובות לפי קוד מכשיר (עבור האפליקציה) - תיקון
 app.get('/api/responses/:deviceCode', (req, res) => {
     const { deviceCode } = req.params;
     const upperCode = deviceCode.toUpperCase();
     
-    // קבל תגובות מ-5 הדקות האחרונות (לא שעה שלמה)
+    console.log(`📥 Getting responses for device: ${upperCode}`);
+    
+    // קבל תגובות מ-5 הדקות האחרונות
     const fiveMinutesAgo = Math.floor(Date.now() / 1000) - 300;
     
     db.all('SELECT response_data, created_at FROM responses WHERE device_code = ? AND created_at > ? ORDER BY created_at DESC LIMIT 10',
         [upperCode, fiveMinutesAgo], (err, responses) => {
         if (err) {
+            console.error('❌ Failed to get responses:', err);
             return res.status(500).json({ error: 'Failed to get responses' });
         }
         
-        // מחק תגובות שנקראו (אופציונלי)
-        if (responses.length > 0) {
-            const oldestTimestamp = responses[responses.length - 1].created_at;
-            db.run('DELETE FROM responses WHERE device_code = ? AND created_at <= ?', 
-                [upperCode, oldestTimestamp]);
-        }
+        console.log(`📨 Found ${responses.length} responses for ${upperCode}`);
         
+        // פענח תגובות
         const parsedResponses = responses.map(r => {
             try {
                 return {
@@ -383,9 +391,21 @@ app.get('/api/responses/:deviceCode', (req, res) => {
                     timestamp: r.created_at
                 };
             } catch (e) {
+                console.error('❌ Failed to parse response:', e);
                 return { error: 'Invalid response data', timestamp: r.created_at };
             }
         });
+        
+        // מחק תגובות שנקראו (רק אם יש תגובות)
+        if (responses.length > 0) {
+            const oldestTimestamp = responses[responses.length - 1].created_at;
+            db.run('DELETE FROM responses WHERE device_code = ? AND created_at <= ?', 
+                [upperCode, oldestTimestamp], (deleteErr) => {
+                if (deleteErr) {
+                    console.error('⚠️ Failed to cleanup responses:', deleteErr);
+                }
+            });
+        }
         
         res.json(parsedResponses);
     });
